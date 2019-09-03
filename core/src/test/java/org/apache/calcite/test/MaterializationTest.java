@@ -126,6 +126,13 @@ public class MaterializationTest {
       new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, RexUtil.EXECUTOR)
           .withParanoid(true);
 
+  private final String deduplicatedEmps =
+      "(select distinct \"empid\", \"deptno\", \"name\", \"salary\", \"commission\"\n"
+          + "from \"emps\") \"dedupEmps\"";
+  private final String deduplicatedDepts =
+      "(select distinct \"deptno\", \"name\"\n"
+          + "from \"depts\") \"dedupDepts\"";
+
   @Test public void testScan() {
     CalciteAssert.that()
         .withMaterializations(
@@ -317,7 +324,7 @@ public class MaterializationTest {
         HR_FKUK_MODEL,
         CalciteAssert.checkResultContains(
             "EnumerableCalc(expr#0..2=[{inputs}], expr#3=[2], "
-                + "expr#4=[=($t0, $t3)], name=[$t2], EE=[$t1], $condition=[$t4])\n"
+                + "expr#4=[=($t0, $t3)], name=[$t2], E=[$t1], $condition=[$t4])\n"
                 + "  EnumerableTableScan(table=[[hr, m0]]"));
   }
 
@@ -412,7 +419,7 @@ public class MaterializationTest {
         HR_FKUK_MODEL,
         CalciteAssert.checkResultContains(
             "EnumerableCalc(expr#0..2=[{inputs}], expr#3=[1], expr#4=[+($t1, $t3)], expr#5=[10], "
-                + "expr#6=[CAST($t0):INTEGER NOT NULL], expr#7=[=($t5, $t6)], $f0=[$t4], "
+                + "expr#6=[CAST($t0):INTEGER NOT NULL], expr#7=[=($t5, $t6)], X=[$t4], "
                 + "name=[$t2], $condition=[$t7])\n"
                 + "  EnumerableTableScan(table=[[hr, m0]])"));
   }
@@ -543,6 +550,22 @@ public class MaterializationTest {
             + "or (em.\"empid\" > 400 and em.\"salary\" > 5000)",
         "select \"name\" as n from \"emps\" as e where "
             + "(e.\"empid\" > 500 and e.\"salary\" > 6000)");
+  }
+
+  @Test public void testFilterOnProject() {
+    String mv = ""
+        + "select * from\n"
+        + "(select \"deptno\", sum(\"salary\") as \"sum_salary\", sum(\"commission\")\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "group by \"deptno\")\n"
+        + "where \"sum_salary\" > 10";
+    String query = ""
+        + "select * from\n"
+        + "(select \"deptno\", sum(\"salary\") as \"sum_salary\"\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "group by \"deptno\")\n"
+        + "where \"sum_salary\" > 10";
+    checkMaterialize(mv, query);
   }
 
   /** Aggregation query at same level of aggregation as aggregation
@@ -714,6 +737,31 @@ public class MaterializationTest {
                 + "    EnumerableTableScan(table=[[hr, m0]])"));
   }
 
+  @Test public void testAggregateOnProjectAndFilter() {
+    String mv = ""
+        + "select \"deptno\", sum(\"salary\"), count(1)\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "group by \"deptno\"";
+    String query = ""
+        + "select \"deptno\", count(1)\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "where \"deptno\" = 10\n"
+        + "group by \"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testProjectOnProject() {
+    String mv = ""
+        + "select \"deptno\", sum(\"salary\") + 2, sum(\"commission\")\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "group by \"deptno\"";
+    String query = ""
+        + "select \"deptno\", sum(\"salary\") + 2\n"
+        + "from " + deduplicatedEmps + "\n"
+        + "group by \"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
   @Test public void testPermutationError() {
     checkMaterialize(
         "select min(\"salary\"), count(*), max(\"salary\"), sum(\"salary\"), \"empid\" "
@@ -721,6 +769,118 @@ public class MaterializationTest {
         "select count(*), \"empid\" from \"emps\" group by \"empid\"",
         HR_FKUK_MODEL,
         CalciteAssert.checkResultContains("EnumerableTableScan(table=[[hr, m0]])"));
+  }
+
+  @Test public void testJoinOnLeftProjectToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\"), sum(\"commission\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\", count(\"name\")\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    String query = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\", count(\"name\")\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testJoinOnRightProjectToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\"), sum(\"commission\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\", count(\"name\")\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    String query = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\"), sum(\"commission\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\"\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testJoinOnProjectsToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\"), sum(\"commission\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\", count(\"name\")\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    String query = ""
+        + "select * from\n"
+        + "  (select \"deptno\", sum(\"salary\")\n"
+        + "  from " + deduplicatedEmps + "\n"
+        + "  group by \"deptno\") \"A\"\n"
+        + "  join\n"
+        + "  (select \"deptno\"\n"
+        + "  from " + deduplicatedDepts + "\n"
+        + "  group by \"deptno\") \"B\"\n"
+        + "  on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testJoinOnLeftCalcToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + deduplicatedEmps + " join " + deduplicatedDepts + "\n"
+        + "on \"dedupEmps\".\"deptno\" = \"dedupDepts\".\"deptno\"";
+    String query = ""
+        + "select * from \n"
+        + " (select \"empid\", \"deptno\" from " + deduplicatedEmps + "where \"deptno\" > 10) A"
+        + " join " + deduplicatedDepts + "\n"
+        + "on \"A\".\"deptno\" = \"dedupDepts\".\"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testJoinOnRightCalcToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + deduplicatedEmps + " join " + deduplicatedDepts + "\n"
+        + "on \"dedupEmps\".\"deptno\" = \"dedupDepts\".\"deptno\"";
+    String query = ""
+        + "select * from\n"
+        + deduplicatedEmps + " join\n"
+        + "(select \"deptno\" from " + deduplicatedDepts + " where \"deptno\" > 10) B\n"
+        + "on \"dedupEmps\".\"deptno\" = \"B\".\"deptno\"";
+    checkMaterialize(mv, query);
+  }
+
+  @Test public void testJoinOnFiltersToJoin() {
+    String mv = ""
+        + "select * from\n"
+        + deduplicatedEmps + " join " + deduplicatedDepts + "\n"
+        + "on \"dedupEmps\".\"deptno\" = \"dedupDepts\".\"deptno\"";
+    String query = ""
+        + "select * from\n"
+        + "(select \"empid\", \"deptno\" from " + deduplicatedEmps + " where \"empid\" > 10) A\n"
+        + "join\n"
+        + "(select \"deptno\" from " + deduplicatedDepts + " where \"deptno\" > 10) B\n"
+        + "on \"A\".\"deptno\" = \"B\".\"deptno\"";
+    checkMaterialize(mv, query);
   }
 
   @Test public void testSwapJoin() {
@@ -1217,6 +1377,7 @@ public class MaterializationTest {
   }
 
   @Test public void testAggregateMaterializationNoAggregateFuncs6() {
+    SubstitutionVisitor.DISABLED = true;
     checkMaterialize(
         "select \"empid\", \"deptno\" from \"emps\" where \"deptno\" > 5 group by \"empid\", \"deptno\"",
         "select \"deptno\" from \"emps\" where \"deptno\" > 10 group by \"deptno\"",
@@ -1226,6 +1387,7 @@ public class MaterializationTest {
                 + "  EnumerableCalc(expr#0..1=[{inputs}], expr#2=[10], expr#3=[<($t2, $t1)], "
                 + "proj#0..1=[{exprs}], $condition=[$t3])\n"
                 + "    EnumerableTableScan(table=[[hr, m0]])"));
+    SubstitutionVisitor.DISABLED = false;
   }
 
   @Test public void testAggregateMaterializationNoAggregateFuncs7() {
@@ -1288,6 +1450,7 @@ public class MaterializationTest {
   }
 
   @Test public void testAggregateMaterializationAggregateFuncs4() {
+    SubstitutionVisitor.DISABLED = true;
     checkMaterialize(
         "select \"empid\", \"deptno\", count(*) as c, sum(\"empid\") as s\n"
             + "from \"emps\" where \"deptno\" >= 10 group by \"empid\", \"deptno\"",
@@ -1299,6 +1462,7 @@ public class MaterializationTest {
                 + "  EnumerableCalc(expr#0..3=[{inputs}], expr#4=[10], expr#5=[<($t4, $t1)], "
                 + "proj#0..3=[{exprs}], $condition=[$t5])\n"
                 + "    EnumerableTableScan(table=[[hr, m0]])"));
+    SubstitutionVisitor.DISABLED = false;
   }
 
   @Test public void testAggregateMaterializationAggregateFuncs5() {
@@ -1445,6 +1609,7 @@ public class MaterializationTest {
   }
 
   @Test public void testJoinAggregateMaterializationNoAggregateFuncs1() {
+    SubstitutionVisitor.DISABLED = true;
     checkMaterialize(
         "select \"empid\", \"depts\".\"deptno\" from \"emps\"\n"
             + "join \"depts\" using (\"deptno\") where \"depts\".\"deptno\" > 10\n"
@@ -1457,6 +1622,7 @@ public class MaterializationTest {
             "EnumerableCalc(expr#0..1=[{inputs}], expr#2=[20], expr#3=[<($t2, $t1)], "
                 + "empid=[$t0], $condition=[$t3])\n"
                 + "  EnumerableTableScan(table=[[hr, m0]])"));
+    SubstitutionVisitor.DISABLED = false;
   }
 
   @Test public void testJoinAggregateMaterializationNoAggregateFuncs2() {
@@ -1502,6 +1668,7 @@ public class MaterializationTest {
   }
 
   @Test public void testJoinAggregateMaterializationNoAggregateFuncs5() {
+    SubstitutionVisitor.DISABLED = true;
     checkMaterialize(
         "select \"depts\".\"deptno\", \"emps\".\"empid\" from \"depts\"\n"
             + "join \"emps\" using (\"deptno\") where \"emps\".\"empid\" > 10\n"
@@ -1514,9 +1681,11 @@ public class MaterializationTest {
             "EnumerableCalc(expr#0..1=[{inputs}], expr#2=[15], expr#3=[<($t2, $t1)], "
                 + "deptno=[$t0], $condition=[$t3])\n"
                 + "  EnumerableTableScan(table=[[hr, m0]])"));
+    SubstitutionVisitor.DISABLED = false;
   }
 
   @Test public void testJoinAggregateMaterializationNoAggregateFuncs6() {
+    SubstitutionVisitor.DISABLED = true;
     checkMaterialize(
         "select \"depts\".\"deptno\", \"emps\".\"empid\" from \"depts\"\n"
             + "join \"emps\" using (\"deptno\") where \"emps\".\"empid\" > 10\n"
@@ -1530,6 +1699,7 @@ public class MaterializationTest {
                 + "  EnumerableCalc(expr#0..1=[{inputs}], expr#2=[15], expr#3=[<($t2, $t1)], "
                 + "proj#0..1=[{exprs}], $condition=[$t3])\n"
                 + "    EnumerableTableScan(table=[[hr, m0]])"));
+    SubstitutionVisitor.DISABLED = false;
   }
 
   @Test public void testJoinAggregateMaterializationNoAggregateFuncs7() {
@@ -2184,7 +2354,7 @@ public class MaterializationTest {
    * <a href="https://issues.apache.org/jira/browse/CALCITE-761">[CALCITE-761]
    * Pre-populated materializations</a>. */
   @Test public void testPrePopulated() {
-    String q = "select \"deptno\" from \"emps\"";
+    String q = "select distinct \"deptno\" from \"emps\"";
     try (TryThreadLocal.Memo ignored = Prepare.THREAD_TRIM.push(true)) {
       MaterializationService.setThreadLocal();
       CalciteAssert.that()
@@ -2192,7 +2362,7 @@ public class MaterializationTest {
               HR_FKUK_MODEL, builder -> {
                 final Map<String, Object> map = builder.map();
                 map.put("table", "locations");
-                String sql = "select `deptno` as `empid`, '' as `name`\n"
+                String sql = "select distinct `deptno` as `empid`, '' as `name`\n"
                     + "from `emps`";
                 final String sql2 = sql.replaceAll("`", "\"");
                 map.put("sql", sql2);
