@@ -1151,6 +1151,13 @@ public class VolcanoPlanner extends AbstractRelOptPlanner {
     }
   }
 
+  public void dump() {
+    StringWriter sw = new StringWriter();
+    final PrintWriter pw = new PrintWriter(sw);
+    dump(pw);
+    pw.flush();
+    System.out.println(sw.toString());
+  }
   /**
    * Dumps the internal state of this VolcanoPlanner to a writer.
    *

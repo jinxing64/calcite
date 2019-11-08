@@ -16,24 +16,29 @@
  */
 package org.apache.calcite.plan.volcano;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
 import org.apache.calcite.adapter.enumerable.EnumerableRules;
 import org.apache.calcite.adapter.enumerable.EnumerableUnion;
 import org.apache.calcite.plan.Convention;
 import org.apache.calcite.plan.ConventionTraitDef;
 import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptListener;
+import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.SingleRel;
 import org.apache.calcite.rel.convert.ConverterImpl;
 import org.apache.calcite.rel.convert.ConverterRule;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.RelFactories;
 import org.apache.calcite.rel.logical.LogicalProject;
+import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rel.rules.ProjectRemoveRule;
 import org.apache.calcite.tools.RelBuilder;
 
@@ -125,6 +130,168 @@ public class VolcanoPlannerTest {
     RelNode result = planner.chooseDelegate().findBestExp();
     assertTrue(result instanceof PhysSingleRel);
   }
+
+  @Test public void testDEV() {
+    VolcanoPlanner planner = new VolcanoPlanner();
+    planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+    planner.addRule(new GrandRule());
+    planner.addRule(new MotherRule2());
+    planner.addRule(new MotherRule());
+    planner.addRule(new LeafRule());
+    RelOptCluster cluster = newCluster(planner);
+    NoneLeafRel leafRel = new NoneLeafRel(cluster, "a");
+    NoneMotherRel motherRel = new NoneMotherRel(cluster, leafRel);
+    NoneGrandRel grandRel = new NoneGrandRel(cluster, motherRel);
+    RelNode convertedRel = planner.changeTraits(
+        grandRel,
+        cluster.traitSetOf(PHYS_CALLING_CONVENTION));
+    planner.setRoot(convertedRel);
+    planner.dump();
+    RelNode result = planner.findBestExp();
+  }
+
+  static class GrandRule extends RelOptRule {
+    GrandRule() { super(operand(NoneGrandRel.class, any())); }
+    public void onMatch(RelOptRuleCall call) {
+      NoneGrandRel single = call.rel(0);
+      RelNode input = single.getInput();
+      RelNode newInput = call.getPlanner().changeTraits(
+          input, input.getTraitSet().replace(PHYS_CALLING_CONVENTION));
+      RelNode newRel = new PhysGrandRel(single.getCluster(), newInput);
+      call.transformTo(newRel);
+    }
+  }
+
+  static class MotherRule extends RelOptRule {
+    MotherRule() { super(operand(NoneMotherRel.class, operand(PhysLeafRel.class, none()))); }
+    public void onMatch(RelOptRuleCall call) {
+      NoneMotherRel single = call.rel(0);
+      RelNode input = single.getInput();
+      RelNode newRel = new PhysMotherRel(single.getCluster(), input);
+      call.transformTo(newRel);
+    }
+  }
+
+  static class MotherRule2 extends RelOptRule {
+    MotherRule2() { super(operand(NoneMotherRel.class, operand(NoneLeafRel.class, none()))); }
+    public void onMatch(RelOptRuleCall call) {
+      NoneMotherRel single = call.rel(0);
+      RelNode input = single.getInput();
+      RelNode newInput = call.getPlanner().changeTraits(
+          input, input.getTraitSet().replace(PHYS_CALLING_CONVENTION));
+      call.transformTo(single.copy(single.getTraitSet(), ImmutableList.of(newInput)));
+    }
+  }
+
+  static class LeafRule extends RelOptRule {
+    LeafRule() { super(operand(NoneLeafRel.class, none())); }
+    public void onMatch(RelOptRuleCall call) {
+      NoneLeafRel single = call.rel(0);
+      RelNode newRel = new PhysLeafRel(single.getCluster(), single.label);
+      call.transformTo(newRel);
+    }
+  }
+
+
+  /** Relational expression with one input and convention NONE. */
+  static class NoneGrandRel extends SingleRel {
+    NoneGrandRel(RelOptCluster cluster, RelNode input) {
+      super(cluster, cluster.traitSetOf(Convention.NONE), input);
+    }
+
+    @Override public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(Convention.NONE);
+      return new NoneGrandRel(getCluster(), sole(inputs));
+    }
+  }
+
+  /** Relational expression with one input and convention PHYS. */
+  static class PhysGrandRel extends SingleRel {
+    PhysGrandRel(RelOptCluster cluster, RelNode input) {
+      super(cluster, cluster.traitSetOf(PHYS_CALLING_CONVENTION), input);
+    }
+
+    @Override public RelOptCost computeSelfCost(RelOptPlanner planner,
+                                                RelMetadataQuery mq) {
+      return planner.getCostFactory().makeTinyCost();
+    }
+
+    public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(PHYS_CALLING_CONVENTION);
+      return new PhysGrandRel(getCluster(), sole(inputs));
+    }
+  }
+
+  /** Relational expression with one input and convention NONE. */
+  static class NoneMotherRel extends SingleRel {
+    NoneMotherRel(RelOptCluster cluster, RelNode input) {
+      super(cluster, cluster.traitSetOf(Convention.NONE), input);
+    }
+
+    @Override public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(Convention.NONE);
+      return new NoneMotherRel(getCluster(), sole(inputs));
+    }
+  }
+
+  /** Relational expression with one input and convention PHYS. */
+  static class PhysMotherRel extends SingleRel {
+    PhysMotherRel(RelOptCluster cluster, RelNode input) {
+      super(cluster, cluster.traitSetOf(PHYS_CALLING_CONVENTION), input);
+    }
+
+    @Override public RelOptCost computeSelfCost(RelOptPlanner planner,
+                                                RelMetadataQuery mq) {
+      return planner.getCostFactory().makeTinyCost();
+    }
+
+    public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(PHYS_CALLING_CONVENTION);
+      return new PhysMotherRel(getCluster(), sole(inputs));
+    }
+  }
+
+  /** Relational expression with zero inputs and convention NONE. */
+  static class NoneLeafRel extends PlannerTests.TestLeafRel {
+    NoneLeafRel(RelOptCluster cluster, String label) {
+      super(cluster, cluster.traitSetOf(Convention.NONE), label);
+    }
+
+    @Override public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(Convention.NONE);
+      assert inputs.isEmpty();
+      return this;
+    }
+  }
+
+  /** Relational expression with zero inputs and convention PHYS. */
+  static class PhysLeafRel extends PlannerTests.TestLeafRel {
+    Convention convention;
+
+    PhysLeafRel(RelOptCluster cluster, String label) {
+      this(cluster, PHYS_CALLING_CONVENTION, label);
+    }
+
+    PhysLeafRel(RelOptCluster cluster, Convention convention, String label) {
+      super(cluster, cluster.traitSetOf(convention), label);
+      this.convention = convention;
+    }
+
+    @Override public RelOptCost computeSelfCost(RelOptPlanner planner,
+                                                RelMetadataQuery mq) {
+      return planner.getCostFactory().makeTinyCost();
+    }
+
+    @Override public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
+      assert traitSet.comprises(convention);
+      assert inputs.isEmpty();
+      return this;
+    }
+  }
+
+
+
+
 
   /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-3118">[CALCITE-3118]
